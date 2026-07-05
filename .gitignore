@@ -8,3 +8,11 @@
 .project
 .settings/
 .idea/
+
+# Don't commit the 461 MB demo installer (it's copyrighted + huge; keep local only)
+/D3Demo.exe
+/D3Demo*.exe
+
+docs/*
+
+*.exe
