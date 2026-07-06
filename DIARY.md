@@ -96,11 +96,76 @@ the archive format."
 (PackageForTheWeb-style). The payload is in InstallShield's proprietary cabinet
 format, possibly XOR-encrypted, so a plain unzip won't reach demo00.pk4.
 
-### Next (Turn 3)
-Need a tool that understands InstallShield cabinets (unshield) or run the
-installer under Wine to extract files to disk, then grab demo00.pk4 and feed it
-to tools/add_game_data.sh.
+### Correction: it is NOT InstallShield — it is a Wise installer
+Scanning the PE bootstrapper's strings revealed the real framework:
+```
+Initializing Wise Installation Wizard...
+Could not extract Wise0132.dll to '%s', CRC does not match.
+WiseMain
+```
+So D3Demo.exe is a **Wise Installation System** self-extractor (the "ISCG"
+hits were false positives). That changed the whole tool choice — InstallShield
+tools (unshield, iss_extract) would not help.
 
-**Status after Turn 2**: Identified the installer format; extraction pending.
-The demo00.pk4 (itself a renamed ZIP) is almost certainly the bulk of the
-469 MB payload — we just need the right extractor.
+(We had already installed unshield + cabextract via Homebrew; they turned out
+to be unnecessary for this installer, but harmless to have around.)
+
+### Problem 5 — Native extraction of a Wise installer on macOS
+Wise installers store their payload in a proprietary compressed overlay, so a
+plain unzip can't reach the files. We needed a tool that understands the Wise
+overlay format.
+
+**Attempts**:
+1. `iss_extract` (hifi/iss_extract, built from source) — lists InstallShield
+   setup exes with embedded data. Ran `iss_extract l D3Demo.exe` → no files.
+   Confirmed it's not an embedded InstallShield setup. Dead end.
+2. **REWise** (https://codeberg.org/CYBERDEV/REWise) — "Extract files from
+   Wise installers without executing them", explicitly built for 1999–2004
+   game installers. The Doom 3 Demo is from 2004 — perfect fit.
+   - Cloned + built with CMake (`cmake .. && cmake --build . -j8`) using
+     Apple clang. Produced the `rewise` binary (v0.3.1).
+
+### Extraction
+- `rewise -l D3Demo.exe` listed the payload, including:
+  `MAINDIR/demo/demo00.pk4  483534533 bytes  (461 MB)` — the file we need.
+- `rewise -x /tmp/d3demo -f '*demo00.pk4' D3Demo.exe` extracted just that one
+  file to `/tmp/d3demo/MAINDIR/demo/demo00.pk4` (461 MB). `file` confirmed it
+  is a valid ZIP archive (pk4 = renamed ZIP).
+- Copied it to `build-wasm/data/demo/demo00.pk4` (where the build expects it).
+
+### Problem 6 — `package_demo_data` fails: `python: command not found`
+The `make package_demo_data` target runs `neo/sys/wasm/package_demo_data.sh`,
+which calls `python`. macOS ships only `python3` (no `python`), so it errored
+with exit 127.
+**Solution**: Ran Emscripten's `tools/file_packager.py` directly with the SDK's
+own interpreter (`$EMSDK_PYTHON`) to unblock immediately, then patched
+`package_demo_data.sh` to use `${EMSDK_PYTHON:-python3}` (and dropped the
+now-no-op `--no-heap-copy` flag) so the make target works going forward.
+
+Result: `demo00.data` (461 MB) + `demo00.js` (13 KB) generated in build-wasm/.
+
+### Housekeeping
+- Added `/D3Demo.exe` to `.gitignore` so the 461 MB copyrighted installer is
+  never accidentally committed. (build-wasm/ is already gitignored, so the
+  generated data/assets stay local too.)
+- Removed the temp extraction (/tmp/d3demo) to reclaim 461 MB.
+
+### Verification
+`curl` against the running server (port 3000) — every asset now returns 200:
+```
+d3wasm.html -> HTTP 200
+d3wasm.js   -> HTTP 200
+d3wasm.wasm -> HTTP 200
+demo00.js   -> HTTP 200
+demo00.data -> HTTP 200  (Content-Length: 483534533, application/octet-stream)
+```
+
+**Status after Turn 2 — DONE**: The engine is built, the demo game data is
+extracted and packaged, and everything is served at
+http://localhost:3000/d3wasm.html. Open it in a WebGL-capable browser (Chrome/
+Edge) to play the Doom 3 Demo. Heads-up: first load fetches the 461 MB
+demo00.data, so give it time to download + the wasm to compile.
+
+### Tools installed this turn
+brew install 7zip unar unshield cabextract ; built REWise + iss_extract from
+source. The hero tool was REWise; the rest were reconnaissance.

@@ -328,6 +328,11 @@ const void	RB_SwapBuffers( const void *data ) {
   // GAB Note Dec 2018: Clear the Alpha channel, so that final render will not blend with the HTML5 background (canvas with premultiplied alpha)
   qglColorMask(0, 0, 0, 1);
   qglClear(GL_COLOR_BUFFER_BIT);
+  // D3WEBGPU FIX: Reset color mask after alpha clear. RB_SwapBuffers bypasses the
+  // GL_State tracker (backEnd.glState.glStateBits) by calling qglColorMask directly.
+  // Without this reset, the next frame's GL_State() sees no diff and leaves RGB writes
+  // blocked (0,0,0,1) -> black canvas. This was the root cause of the black screen.
+  qglColorMask(1, 1, 1, 1);
   #endif
 
 

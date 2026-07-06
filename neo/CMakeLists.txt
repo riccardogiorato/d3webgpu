@@ -240,20 +240,30 @@ if (EMSCRIPTEN)
   set(ldflags "${ldflags} --shell-file ../neo/sys/wasm/shell.html")
   set(ldflags "${ldflags} -o d3wasm.html")
   set(ldflags "${ldflags} -s FORCE_FILESYSTEM=1")
-  set(ldflags "${ldflags} -s TOTAL_MEMORY=402653184") # 384MB. Going below 320MB lead to crashes after a couple of levels played.
+  set(ldflags "${ldflags} -s INITIAL_MEMORY=402653184") # 384MB initial (proven value; going below 320MB crashed after a couple of levels)
+  set(ldflags "${ldflags} -s ALLOW_MEMORY_GROWTH=1")    # let the heap grow past 384MB if the engine needs more (newer Emscripten)
+  set(ldflags "${ldflags} -s MAXIMUM_MEMORY=2147483648") # cap growth at 2GB (wasm32-safe)
+  set(ldflags "${ldflags} -s STACK_SIZE=8388608")       # 8MB stack; id Tech 4 init needs far more than the Emscripten default
   set(ldflags "${ldflags} -s ASYNCIFY=1")
   set(ldflags "${ldflags} -s MINIFY_HTML=0")
   set(ldflags "${ldflags} -s ENVIRONMENT=web")
 
-  if (CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
-    file(READ ../neo/sys/wasm/asyncify.win.json ASYNCIFY_WHITELIST)
-    set(ldflags "${ldflags} -s \"ASYNCIFY_WHITELIST=${ASYNCIFY_WHITELIST}\"")
-  else()
-    file(READ ../neo/sys/wasm/asyncify.json ASYNCIFY_WHITELIST)
-    set(ldflags "${ldflags} -s 'ASYNCIFY_WHITELIST=${ASYNCIFY_WHITELIST}'")
-  endif()
-  set(ldflags "${ldflags} -s EXIT_RUNTIME=0")   # Don't exit the runtime
-  set(ldflags "${ldflags} -s ASSERTIONS=0")     # Disabling assertion slightly reduce binary size
+# if (CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
+#   file(READ ../neo/sys/wasm/asyncify.win.json ASYNCIFY_WHITELIST)
+#   set(ldflags "${ldflags} -s \"ASYNCIFY_WHITELIST=${ASYNCIFY_WHITELIST}\"")
+# else()
+#   file(READ ../neo/sys/wasm/asyncify.json ASYNCIFY_WHITELIST)
+#   set(ldflags "${ldflags} -s 'ASYNCIFY_WHITELIST=${ASYNCIFY_WHITELIST}'")
+# endif()
+  # D3WEBGPU: ASYNCIFY_WHITELIST disabled — the whitelist has outdated demangled
+  # function names (11 non-matching/non-existing on Emscripten 6.0.2 / newer clang).
+  # Without the whitelist, ALL functions are instrumented for asyncify (slower
+  # binary, but guaranteed correct). Key culprit: idSessionLocal::MenuEvent had a
+  # "non-matching pattern" (char const* vs char const *) and was silently NOT
+  # instrumented — corrupting state when a yield happened inside it during the
+  # frame loop, which caused a black canvas after successful init.
+ set(ldflags "${ldflags} -s EXIT_RUNTIME=0")   # Don't exit the runtime
+  set(ldflags "${ldflags} -s ASSERTIONS=1")     # TEMP: enable assertions to diagnose the init OOB crash (revert later)
   # D3 uses its own optimized memory allocator, build on top of malloc.
   # while dlmalloc might be a bit bigger in size than emmalloc, it is more efficient with the optimized memory allocator
   set(ldflags "${ldflags} -s MALLOC=dlmalloc")
