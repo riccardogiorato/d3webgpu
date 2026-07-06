@@ -256,9 +256,45 @@
     }
   }
 
+  // D3WEBGPU FIX: Cache-busting for .wasm/.data/.js files.
+  // Arc/Chrome aggressively caches these; without a version query param the
+  // old wasm (with ALLOW_MEMORY_GROWTH=1 → resizable heap → WebGL crash) is
+  // served from the browser cache.
+  var _CACHE_VERSION = "v2";
+
+  // D3WEBGPU FIX: ESC key + pointer lock on macOS.
+  // When pointer lock is active, the browser intercepts ESC to exit pointer lock
+  // and does NOT forward the keyup to the canvas. We listen for pointerlockchange
+  // and, when lock exits, dispatch a synthetic ESC keyup event so the game receives it.
+  var _pendingEscForward = false;
+  document.addEventListener('pointerlockchange', function() {
+    if (!document.pointerLockElement) {
+      // Pointer lock just exited — forward ESC to game
+      _pendingEscForward = true;
+      setTimeout(function() {
+        if (_pendingEscForward) {
+          var canvas = document.getElementById('canvas');
+          if (canvas) {
+            // keyCode 27 = Escape, key = 'Escape'
+            canvas.dispatchEvent(new KeyboardEvent('keydown', {key:'Escape',code:'Escape',keyCode:27,which:27,bubbles:true}));
+            canvas.dispatchEvent(new KeyboardEvent('keyup',   {key:'Escape',code:'Escape',keyCode:27,which:27,bubbles:true}));
+            console.log('[D3WEBGPU] Forwarded ESC to canvas after pointer lock exit');
+          }
+          _pendingEscForward = false;
+        }
+      }, 50);
+    }
+  });
+
   var Module = {
     preRun: [],
     postRun: [showDisclaimer],
+    locateFile: function(path) {
+      if (path.endsWith('.wasm') || path.endsWith('.data') || path.endsWith('.js')) {
+        return path + '?v=' + _CACHE_VERSION;
+      }
+      return path;
+    },
     print: (function () {
       var element = document.getElementById('output');
       if (element) element.value = ''; // clear browser cache

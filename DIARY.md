@@ -564,3 +564,98 @@ The "intro cinematic" in the Doom 3 *demo* is a 10s GUI animation, not a video
 file. Skipping it is a one-arg change (`StartMenu(false)`). Always grep
 `default.cfg` to verify which keys are actually bound before documenting
 keyboard shortcuts to users.
+
+## Turn 10 — Hot-reload dev server: replace the dead python http.server (GLM 5.2)
+
+### Problem
+Phase 1 served the build with `python3 -m http.server 3001` (run from
+`build-wasm/`, per `package.json`'s `dev`/`start`/`preview` scripts). Three
+frictions:
+1. **Root was a directory listing.** `http://localhost:3001/` showed a file
+   index — you had to type `/d3wasm.html` every time.
+2. **No cache headers → stale-cache traps.** `http.server` sends no
+   `Cache-Control`, so Arc/Chrome aggressively cached the `.wasm`/`.js`/`.data`
+   and served the *old* (pre-fix, crashy) build on reload. This is the exact
+   failure that cost Turns 5–7 (resizable-heap `bufferData` crash). We papered
+   over it with `?v=v2` cache-busting in `d3wasm.html`'s `locateFile`, but every
+   new fix meant bumping the version string and praying the browser honored it.
+3. **No live reload.** Every `emmake make` required a manual hard-refresh
+   (Cmd-Shift-R) and a re-click through the menu — slow inner loop.
+
+### Investigation
+- `node -v` → v26.4.0 is present, so a **zero-dependency Node** server is free
+  (no `npm install` for `chokidar`/`ws`/`vite`). The repo already has
+  `"type": "module"`, so `.mjs` + ESM `import` works directly.
+- Live reload needs a server→browser push. **SSE (`EventSource`)** beats
+  WebSocket here: built into every browser, no framing library, unidirectional
+  is all we need ("a file changed → reload").
+- The watcher must filter to **served artifacts only** (`.html/.js/.wasm/.data/
+  .mem/.pak/.pk4/.css`). `build-wasm/` also contains `CMakeFiles/`, `*.o`,
+  `*.a`, `Makefile`, `CMakeCache.txt` — a `make` reconfigure rewrites dozens of
+  those. Watching everything would reload the page mid-build into a
+  half-compiled state.
+- A rebuild writes many files at once, so events must be **debounced** (one
+  reload after writes settle, not one per file).
+- **`Cache-Control: no-store` on every response** retires the entire stale-cache
+  class of bug. In *dev* there is no reason to ever serve a cached artifact;
+  the `?v=` dance becomes redundant (left in place, harmless).
+
+### Solution
+`scripts/dev-server.mjs` (~150 lines, zero deps, only `node:http/fs/path/url`):
+- Serves `build-wasm/` at root. `GET /` → `d3wasm.html` directly (no listing).
+- `GET /__livereload` → SSE stream; registers the response in a `Set`, sends
+  `retry: 2000` + an initial `hello` event.
+- Injects a small client (`window.__d3lr` guard + `new EventSource(...)`, calls
+  `location.reload()` on the `reload` event) **on the fly** before `</body>` of
+  any served HTML. The file on disk (`d3wasm.html`) is untouched — injection is
+  in-memory at serve time, and `Content-Length` is recomputed after injection.
+- `fs.watch(BUILD_DIR, { recursive: true })` (macOS supports recursive) → filter
+  by extension → 250 ms debounce → broadcast `event: reload` to all SSE clients.
+- `Cache-Control: no-store, must-revalidate` on every response; correct MIME
+  for `.wasm` (`application/wasm`), `.js` (`text/javascript`), `.data`
+  (`application/octet-stream`), etc.
+- Path traversal: the WHATWG `URL` parser collapses `..` (and `%2e%2e`) before
+  the handler sees it, so requests can't escape `build-wasm/`; a
+  `filePath.startsWith(BUILD_DIR + sep)` check is kept as belt-and-suspenders.
+- `package.json`: `dev`/`start`/`preview` all → `node scripts/dev-server.mjs`.
+
+### Verification (server-side)
+*This environment has no Computer Use / browser-automation tool, so the
+Turn-9-style "vision subagent drives Chrome" step could not run here. The
+server was verified end-to-end from the shell; the in-browser checks (no
+`bufferData` crash, ESC opens menu, `384 MB System Memory` in console) are
+handed to the user with the server left running.*
+
+Curl battery against `http://localhost:3001/`:
+- `GET /` → `200 text/html`, 14414 bytes; body contains the injected
+  `window.__d3lr` reload client **and** the original `<script src="d3wasm.js">`
+  tag **and** `var Module` — i.e. injection is additive, not destructive.
+- `GET /d3wasm.js` → `200`, `text/javascript; charset=utf-8`,
+  `Cache-Control: no-store, must-revalidate`, `Content-Length: 296521`.
+- `GET /d3wasm.wasm` → `200 application/wasm`, no-store.
+- `GET /demo00.data` → `200 application/octet-stream`, no-store.
+- `GET /__livereload` → streams `retry: 2000` / `event: hello` / `data: connected`.
+- Traversal: `GET /../README.md` and `GET /%2e%2e/README.md` both return
+  `404 Not Found: /README.md` — the repo-root `README.md` (which exists) is
+  **not** leaked. (The URL parser collapses `..` to within-root, so the
+  protection fires as a 404, not the 403 my explicit check would emit. The
+  security *outcome* — outside-root files are unreachable — holds.)
+- `GET /does-not-exist.html` → `404`.
+- Live reload (functional): opened an `EventSource` client via `curl -sN`,
+  `touch`ed `build-wasm/.lrprobe.js` (a watched `.js` extension); within the
+  250 ms debounce the client received `event: reload` /
+  `data: {"reason":".lrprobe.js"}`. Server log: `[reload] .lrprobe.js → 1
+  client`. Probe file removed afterward; `build-wasm/` left clean.
+
+### Lesson
+A dev server's job isn't "serve files" — for a WASM port, **stale-cache serving
+of the old, crashy build is a real, turn-costing failure mode**. A single
+`Cache-Control: no-store` header in dev retires the whole `?v=` cache-busting
+dance and the "is it my fix or is it the cache?" ambiguity that ate Turns 5–7.
+Root→entry-HTML plus SSE live reload then remove the two manual steps (type the
+filename, hard-refresh after rebuild) that throttle the inner loop. Two further
+notes: (1) for live reload, **SSE/`EventSource` is enough** — no need to pull
+WebSocket or a framework for a one-bit "changed → reload" signal; (2) the
+WHATWG URL parser normalizes `..` and `%2e%2e` *before* your route handler, so
+traversal protection often happens upstream of any explicit check — verify the
+**outcome** (an outside-root file isn't served), not the status code.

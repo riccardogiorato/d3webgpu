@@ -9,9 +9,9 @@
     "typescript": "^5"
   },
   "scripts": {
-    "dev": "cd build-wasm && python3 -m http.server 3001",
-    "start": "cd build-wasm && python3 -m http.server 3001",
-    "preview": "cd build-wasm && python3 -m http.server 3001",
+    "dev": "node scripts/dev-server.mjs",
+    "start": "node scripts/dev-server.mjs",
+    "preview": "node scripts/dev-server.mjs",
     "build": "bash scripts/build.sh",
     "build:wasm": "bash scripts/build.sh d3wasm"
   }
