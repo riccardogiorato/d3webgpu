@@ -203,6 +203,35 @@
 <!--<textarea id="output" rows="8"></textarea> -->
 
 <script type='text/javascript'>
+// D3WEBGPU FIX: TextDecoder polyfill for resizable/growable ArrayBuffer compatibility.
+// Emscripten with ALLOW_MEMORY_GROWTH creates a resizable (or growable SharedArrayBuffer)
+// WASM heap. Some Chromium builds reject these in TextDecoder.decode(). This try/catch
+// version is property-name-agnostic: it retries with a fresh, non-resizable Uint8Array
+// copy whenever the native decode throws, regardless of .resizable (ArrayBuffer) or
+// .growable (SharedArrayBuffer). Belt-and-suspenders with the direct d3wasm.js patch.
+(function() {
+  var origDecode = TextDecoder.prototype.decode;
+  TextDecoder.prototype.decode = function(input, options) {
+    try {
+      return origDecode.call(this, input, options);
+    } catch (e) {
+      if (input) {
+        var view = (typeof input.length === 'number')
+          ? input
+          : (typeof input.byteLength === 'number' ? new Uint8Array(input) : null);
+        if (view) {
+          var copy = new Uint8Array(view.length);
+          copy.set(view);
+          return origDecode.call(this, copy, options);
+        }
+      }
+      throw e;
+    }
+  };
+})();
+</script>
+
+<script type='text/javascript'>
   var statusElement = document.getElementById('status');
   var progressElement = document.getElementById('progress');
   var spinnerElement = document.getElementById('spinner');

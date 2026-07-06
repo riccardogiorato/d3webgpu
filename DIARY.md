@@ -357,3 +357,115 @@ When testing WebGL apps with headless browsers:
 with Emscripten, runs in a browser at `http://localhost:3000`, and renders
 the main menu with the DOOM³ logo, Mars planet background, and all menu
 buttons. Phase 1 (Baseline Setup) is done.
+
+---
+
+## Turn 5 — "Blank screen in Arc: the resizable ArrayBuffer trap"
+
+**Goal**: Get the app running in Arc browser (user's preferred browser).
+
+### Problem 11 — TextDecoder rejects resizable ArrayBuffer
+
+After confirming the menu renders in Chrome (via Playwright + Kimi K2.7 vision
+subagent), the user tried loading `localhost:3001/d3wasm.html` in **Arc browser**
+and got a blank screen with:
+
+```
+TypeError: Failed to execute 'decode' on 'TextDecoder':
+  The provided ArrayBuffer value must not be resizable
+    at UTF8ToString (d3wasm.js)
+    at Object.getStr (d3wasm.js)
+    at ___syscall_readlinkat (d3wasm.js)
+```
+
+**Root cause**: Emscripten with `ALLOW_MEMORY_GROWTH=1` + `MAXIMUM_MEMORY=2GB`
+creates the WASM heap as a **resizable ArrayBuffer** (the
+`new ArrayBuffer(size, { maxByteLength })` API, standardized in 2023). The
+Emscripten `UTF8ToString` function passes `HEAPU8.subarray(ptr, end)` to
+`TextDecoder.decode()`. Chrome's V8 accepts views of resizable buffers, but
+**Arc's Chromium build rejects them** with "The provided ArrayBuffer value must
+not be resizable."
+
+The crash happens during filesystem initialization — the engine calls
+`readlinkat` to resolve symlinks, Emscripten's syscall shim calls `getStr`
+→ `UTF8ToString` → `TextDecoder.decode(HEAPU8.subarray(...))` → TypeError.
+
+**Solution**: A small polyfill inserted before the Emscripten script in
+`d3wasm.html` (and permanently in `neo/sys/wasm/shell.html`):
+
+```javascript
+(function() {
+  var origDecode = TextDecoder.prototype.decode;
+  TextDecoder.prototype.decode = function(input, options) {
+    if (input && input.buffer && input.buffer.resizable) {
+      var copy = new Uint8Array(input.byteLength);
+      copy.set(input);
+      return origDecode.call(this, copy, options);
+    }
+    return origDecode.call(this, input, options);
+  };
+})();
+```
+
+This intercepts every `TextDecoder.decode()` call, checks if the input is a
+view of a resizable ArrayBuffer, and if so, copies the data to a non-resizable
+`Uint8Array` before decoding. No rebuild needed — just a page reload.
+
+**Key lesson**: When using `ALLOW_MEMORY_GROWTH` with Emscripten 6.x, the WASM
+heap becomes a resizable ArrayBuffer. Any API that touches the heap via
+TypedArray views (TextDecoder, fetch, etc.) may fail in browsers that strictly
+enforce the "no resizable buffers" rule. A small polyfill is the safest fix
+since it doesn't require modifying the minified Emscripten glue code.
+
+### Port conflict with Llama Coder
+
+**Problem**: Port 3000 was occupied by the user's **Llama Coder** Next.js dev
+server (`next-server v16.2.6`). The Python http.server for Doom 3 couldn't bind.
+Chrome showed the Llama Coder 404 page instead of the Doom 3 menu.
+
+**Solution**: Switched the Doom 3 server to **port 3001** and updated
+`package.json` dev/start/preview scripts accordingly. Now `bun run dev` serves
+on port 3001.
+
+## Turn 6 — Mon Jul 6 ~13:00: "Chrome works" was a mirage — both browsers black-screen
+
+### Problem
+The user reported a **black screen in real Google Chrome too** (not only Arc). Until
+now the "Chrome works" confirmation had come *only* from the Playwright-driven Chrome —
+a separate, newer Chromium build with `preserveDrawingBuffer=true` injected. The user's
+actual browsers (Chrome and Arc) showed a black/frozen canvas.
+
+Re-examining the evidence:
+- The Emscripten glue itself checks `HEAP8?.buffer?.resizable` (d3wasm.js ~pos 9259),
+  confirming the WASM heap is a **resizable ArrayBuffer** (because
+  `ALLOW_MEMORY_GROWTH=1` + `MAXIMUM_MEMORY=2GB`).
+- The old polyfill checked `input.buffer.resizable` — which *should* match — yet the
+  error still fired. Remaining explanation: **stale browser cache**. Built `d3wasm.js`
+  (01:22) predates the polyfill bolted onto `d3wasm.html` (14:52), and Python's
+  `http.server` sends no cache-control headers, so browsers kept serving the old files.
+
+### Solution — three-layer fix
+1. **Direct patch of `build-wasm/d3wasm.js`** (root cause; immune to caching/polyfill):
+   wrapped both `UTF8Decoder.decode(...)` call sites in `new Uint8Array(...)` so bytes
+   are copied into a fresh, non-resizable buffer before decoding:
+   - `UTF8ToString`: `UTF8Decoder.decode(new Uint8Array(HEAPU8.subarray(ptr,end)))`
+   - generic string helper: `...new Uint8Array(heapOrArray.subarray(idx,endPtr))...`
+2. **Upgraded the polyfill** in `neo/sys/wasm/shell.html` (source template, committed)
+   and `build-wasm/d3wasm.html` (served) from a `.resizable`-only check to a
+   **property-name-agnostic try/catch**: try native decode; on throw, copy bytes to a
+   non-resizable `Uint8Array` and retry. Catches resizable *and* growable buffers
+   regardless of the property name the browser exposes.
+3. **Cache-busting**: served script tag changed to `d3wasm.js?v=tdfix2` so one fresh
+   navigation loads the patched JS without a manual hard-refresh.
+
+### Verification
+Kimi K2.7 Code vision subagent drives real Chrome via Computer Use → loads
+http://localhost:3001/d3wasm.html, opens DevTools, reads the console, screenshots the
+canvas. (Result appended below.)
+
+### Lesson for the blogpost
+"Works in my automated test browser" ≠ "works for the user." Playwright's bundled
+Chromium silently accepted resizable ArrayBuffers and had `preserveDrawingBuffer` on,
+masking two real-world failures (TextDecoder rejection + stale-cache serving of an
+unpatched build). Always verify in the user's actual browser, and remember
+`python3 -m http.server` emits no cache headers — cache-bust your script tags.
