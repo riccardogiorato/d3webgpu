@@ -10,9 +10,6 @@
   },
   "scripts": {
     "dev": "node scripts/dev-server.mjs",
-    "start": "node scripts/dev-server.mjs",
-    "preview": "node scripts/dev-server.mjs",
-    "build": "bash scripts/build.sh",
-    "build:wasm": "bash scripts/build.sh d3wasm"
+    "build": "bash scripts/build.sh"
   }
 }

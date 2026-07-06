@@ -31,6 +31,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -208,6 +209,59 @@ try {
   console.warn('[watch] fs.watch failed; live reload disabled:', e.message);
 }
 
+// --- Optional: auto-rebuild C++ on source change (REBUILD=1 / npm run dev:watch) ---
+// Watches neo/ for source edits and runs an incremental `emmake make d3wasm`
+// (via scripts/build.sh, which sources emsdk). When make finishes it writes new
+// d3wasm.{wasm,js,html} into build-wasm/ — and the artifact watcher above fires
+// the SSE reload. So: edit a .cpp -> incremental make -> page reloads. No
+// staleness. C++ compiles are NOT instant (one file + relink is seconds; a cold
+// build longer), so this is "warm reload", not sub-millisecond HMR. A failed
+// build does NOT reload the page (don't reload into a broken build) — fix the
+// error and save again.
+const AUTO_REBUILD = process.env.REBUILD !== '0';
+const SRC_EXTS = new Set(['.cpp', '.cc', '.c', '.h', '.hpp', '.hxx', '.inl', '.in', '.cmake']);
+let buildProc = null;
+let buildQueued = false;
+let srcWatchOk = false;
+
+function runBuild(reason) {
+  if (buildProc) { buildQueued = true; return; } // never overlap two makes
+  const startedAt = Date.now();
+  console.log(`\n[build] ${reason} -> incremental make d3wasm ...`);
+  buildProc = spawn('bash', [path.join(REPO_ROOT, 'scripts', 'build.sh'), 'd3wasm'], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, EMSDK_QUIET: '1' }, // silence the EMSDK env-setup spam
+  });
+  const pipe = (stream, fn) => stream.on('data', (d) => d.toString().split('\n').forEach((l) => { if (l) fn(l); }));
+  pipe(buildProc.stdout, (l) => console.log(`[build] ${l}`));
+  pipe(buildProc.stderr, (l) => console.error(`[build] ${l}`));
+  buildProc.on('exit', (code) => {
+    const secs = ((Date.now() - startedAt) / 1000).toFixed(1);
+    buildProc = null;
+    if (code === 0) console.log(`[build] done in ${secs}s — new artifacts will trigger a reload`);
+    else console.error(`[build] FAILED (exit ${code}) in ${secs}s — page NOT reloaded; fix and save again`);
+    if (buildQueued) { buildQueued = false; runBuild('queued change'); }
+  });
+}
+
+if (AUTO_REBUILD) {
+  let srcTimer = null;
+  try {
+    const srcWatcher = fs.watch(path.join(REPO_ROOT, 'neo'), { recursive: true }, (_t, filename) => {
+      if (!filename) return;
+      const ext = path.extname(filename).toLowerCase();
+      const isCmake = /(^|\/)CMakeLists\.txt$/.test(filename.replace(/\\/g, '/'));
+      if (!SRC_EXTS.has(ext) && !isCmake) return;
+      if (srcTimer) clearTimeout(srcTimer);
+      srcTimer = setTimeout(() => { srcTimer = null; runBuild(filename); }, 500);
+    });
+    srcWatcher.on('error', () => {});
+    srcWatchOk = true;
+  } catch (e) {
+    console.warn('[watch] neo/ source watcher failed; auto-rebuild disabled:', e.message);
+  }
+}
+
 server.on('error', (e) => {
   if (e.code === 'EADDRINUSE') {
     console.error(`Port ${PORT} is in use. Try PORT=3002 npm run dev.`);
@@ -225,6 +279,7 @@ server.listen(PORT, () => {
   console.log(`  build dir:   ${BUILD_DIR}`);
   console.log(`  live reload: ${watchOk ? 'SSE /__livereload (watching ' + [...WATCH_EXTS].join(' ') + ')' : 'disabled'}`);
   console.log('  cache:       no-store (every reload fetches fresh)');
+  console.log(`  auto-rebuild: ${AUTO_REBUILD && srcWatchOk ? 'on — edit neo/*.cpp → make → reload' : 'off (REBUILD=0)'}`);
   console.log('');
   if (!fs.existsSync(path.join(BUILD_DIR, ROOT_FILE))) {
     console.warn(`  ⚠  ${ROOT_FILE} not found in build dir. Run \`npm run build\` first.`);
