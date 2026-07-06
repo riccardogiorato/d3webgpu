@@ -7,5 +7,12 @@
   },
   "peerDependencies": {
     "typescript": "^5"
+  },
+  "scripts": {
+    "dev": "cd build-wasm && python3 -m http.server 3000",
+    "start": "cd build-wasm && python3 -m http.server 3000",
+    "preview": "cd build-wasm && python3 -m http.server 3000",
+    "build": "bash scripts/build.sh",
+    "build:wasm": "bash scripts/build.sh d3wasm"
   }
 }

@@ -169,3 +169,191 @@ demo00.data, so give it time to download + the wasm to compile.
 ### Tools installed this turn
 brew install 7zip unar unshield cabextract ; built REWise + iss_extract from
 source. The hero tool was REWise; the rest were reconnaissance.
+
+---
+
+## Turn 3 — "The engine boots, but the canvas is black"
+
+**Goal**: Get past the out-of-bounds crash and make the engine actually render
+something visible.
+
+### Problem 7 — Out-of-bounds memory access crash
+
+After packaging the demo data, the page loaded, downloaded `demo00.data`, and
+the engine started initializing — filesystem, decls, OpenAL/WebAudio,
+OpenGL/WebGL, GLSL shaders, game scripts, session — but then crashed:
+
+```
+RuntimeError: memory access out of bounds
+    at d3wasm.wasm:0xfb1a
+    at d3wasm.wasm:0x7073
+    ... (callMain)
+```
+
+**Diagnosis**: id Tech 4 is a heavy engine. Emscripten's default memory and
+stack settings are far too small. The default `INITIAL_MEMORY` and `STACK_SIZE`
+are designed for small programs, not a full 2004-era AAA game engine.
+
+**Solution**: In `neo/CMakeLists.txt` (the linker flags section, ~line 243),
+changed:
+- `INITIAL_MEMORY=402653184` (384 MB — enough to boot without immediate growth)
+- `ALLOW_MEMORY_GROWTH=1` + `MAXIMUM_MEMORY=2147483648` (2 GB cap — wasm32
+  can address at most 4 GB, and 2 GB leaves room for the stack)
+- `STACK_SIZE=8388608` (8 MB — id Tech 4 uses deep call stacks; the default
+  64 KB was laughably insufficient)
+
+**Result**: The engine initialized completely. Zero pageerrors. Every subsystem
+came up: filesystem, decls, OpenAL/WebAudio, OpenGL/WebGL, GLSL shaders, game
+scripts, session. The main loop started running. But...
+
+### Problem 8 — ASYNCIFY whitelist warnings (11 non-matching functions)
+
+The build emitted 11 warnings:
+```
+Asyncify onlylist contained a non-existing/non-matching function.
+```
+
+**Diagnosis**: `neo/sys/wasm/asyncify.json` contained a whitelist of 11
+function names for Emscripten's ASYNCIFY feature (which lets C++ code do
+async I/O by pausing/resuming the call stack). But the function names used
+older clang mangling, and Emscripten 6.0.2's newer clang mangles them
+differently — so none of the 11 names matched. This meant those functions
+(including `idSessionLocal::MenuEvent`) weren't asyncify-instrumented, which
+would cause issues during gameplay/loading (async callbacks into
+non-instrumented code = undefined behavior).
+
+**Solution**: Commented out the `ASYNCIFY_WHITELIST` if/else block in
+`neo/CMakeLists.txt` (~line 251). Now ALL functions are asyncify-instrumented.
+Trade-off: the binary is larger (~6.5 MB vs 4.4 MB) and slightly slower, but
+guaranteed correct. Worth it for correctness.
+
+**Note**: This was NOT the root cause of the black canvas, but it was a real
+bug that would have bitten later.
+
+### Problem 9 — Black canvas: the engine runs but nothing is visible
+
+The engine was fully initialized and the frame loop was running. We added
+diagnostic prints to verify: `emloopcb` → `Frame()` → `RunEventLoop` →
+`session->Frame()` → `UpdateScreen()` → `Draw()` — all executing correctly.
+`guiActive` was a valid pointer (the demo main menu GUI loaded via fallback
+to `guis/demo_mainmenu.gui`). But the canvas was **completely black**.
+
+**Investigation**: We injected JavaScript to directly manipulate the WebGL
+context. After resetting `gl.colorMask(true, true, true, true)` from JS,
+a `gl.clearColor(1, 0, 0, 1)` + `gl.clear()` produced **RED** `[255, 0, 0, 255]`.
+This proved the GL pipeline was working — only the color mask was blocking
+output.
+
+**Root cause**: In `neo/renderer/tr_backend.cpp`, `RB_SwapBuffers()` (line
+~325) has a WebGL-specific block:
+```cpp
+#ifdef WEBGL
+qglColorMask(0, 0, 0, 1);     // Blocks ALL RGB writes, only alpha
+qglClear(GL_COLOR_BUFFER_BIT); // Clears alpha channel (legitimate WebGL technique)
+#endif
+```
+This is a legitimate WebGL trick: clear the alpha channel to 0 so the canvas
+composites correctly with the page (transparent background where there's no
+content). BUT — this call **bypasses the GL state tracker**
+(`backEnd.glState.glStateBits`). It directly calls `qglColorMask` without
+updating the tracked state. On the next frame, `GL_State()` compares new
+stateBits with the tracked `glStateBits`, sees no diff in color mask bits, and
+**doesn't call `qglColorMask(1, 1, 1, 1)`** to restore it. The actual GL state
+remains at `(0, 0, 0, 1)` — **all RGB writes blocked forever** → black canvas.
+
+**Fix** (in `neo/renderer/tr_backend.cpp`, after the alpha clear):
+```cpp
+qglColorMask(1, 1, 1, 1);  // D3WEBGPU FIX: Reset color mask for next frame
+```
+This manually restores the color mask after the alpha clear, so the next
+frame's rendering can write RGB again.
+
+**Build gotcha**: First build attempt did NOT recompile `tr_backend.cpp`
+(timestamp race — source and object had identical timestamps). Fixed by
+`touch neo/renderer/tr_backend.cpp` then rebuilding. The build output confirmed
+the file was recompiled.
+
+---
+
+## Turn 4 — "Verifying the fix: the preserveDrawingBuffer trap"
+
+**Goal**: Confirm the color mask fix actually produces a visible menu.
+
+### Problem 10 — Playwright pixel check showed all-black (false negative!)
+
+After recompiling with the color mask fix, we ran a Playwright headless
+Chromium test: load `localhost:3000/d3wasm.html`, wait 50s, then sample canvas
+pixels via `drawImage` → `getImageData`. Result: **all pixels black**
+(`nonBlack: 0`, `maxR = maxG = maxB = 0`).
+
+Initial reaction: "the fix didn't work!" But this was a **false negative**.
+
+**Root cause**: By default, WebGL canvases are created with
+`preserveDrawingBuffer: false`. This means the browser **clears the drawing
+buffer after compositing** (displaying) each frame. When you read pixels from
+JS after the frame has been composited (e.g., via `getImageData` or
+`drawImage`), you get **all zeros** — even though the canvas displayed
+content to the user a moment ago!
+
+This is a well-known WebGL gotcha. The content IS displayed to the user (the
+compositor shows it before clearing), but programmatic pixel reading fails
+unless `preserveDrawingBuffer: true` was set at context creation time.
+
+**Solution**: Hooked `HTMLCanvasElement.prototype.getContext` via Playwright's
+`addInitScript` to force `preserveDrawingBuffer: true`:
+```js
+const orig = HTMLCanvasElement.prototype.getContext;
+HTMLCanvasElement.prototype.getContext = function(type, attrs) {
+  if (type.startsWith('webgl')) {
+    attrs = attrs || {};
+    attrs.preserveDrawingBuffer = true;
+  }
+  return orig.call(this, type, attrs);
+};
+```
+
+### Result — the canvas IS rendering!
+
+With `preserveDrawingBuffer: true`, `gl.readPixels` revealed:
+- **14,693 non-black pixels** out of 38,400 samples (38.3% non-black)
+- **`maxR = 255, maxG = 255, maxB = 255`** — full color range present
+- **`centerPixel: [21, 17, 17, 255]`** — dark reddish (Doom 3's dark menu
+  aesthetic)
+- **GL state: `colorMask: [true, true, true, true]`** — the fix IS working,
+  RGB writes are enabled!
+
+### Visual confirmation via Kimi K2.7 Code vision subagent
+
+Since the main agent (GLM-5.2) cannot see images, we spawned a
+**Kimi K2.7 Code** vision subagent to analyze the Playwright screenshot. It
+confirmed:
+
+> The screen shows a **fully illuminated Doom 3 main menu**:
+> - **"DOOM³" logo** — metallic bronze/gold letters with a 3D beveled look
+> - **Mars-like planet** in reddish-orange against a black starfield
+> - **Menu buttons**: NEW GAME, LOAD GAME, MULTIPLAYER, OPTIONS, CREDITS, EXIT GAME
+> - **15 fps** counter visible in the top-right
+> - Rich color range with bright highlights on the planet and logo
+> - The previously reported black-screen color-mask bug is **resolved**
+
+The color mask fix **WORKS**. The Doom 3 demo main menu renders correctly at
+`localhost:3000`. The earlier "black screen" was a combination of:
+1. The color mask leak (real bug, now fixed)
+2. The `preserveDrawingBuffer` false negative (testing artifact, not a real
+   rendering issue — the user in real Chrome always saw the rendered content
+   after the color mask fix)
+
+### Key lesson
+
+When testing WebGL apps with headless browsers:
+- **`drawImage`/`getImageData` will return all zeros** unless
+  `preserveDrawingBuffer: true` is set at context creation
+- Always use `gl.readPixels` with the preserveDrawingBuffer hook for reliable
+  pixel verification
+- The real browser (with default settings) shows the content fine — the buffer
+  is cleared AFTER display, not before
+
+**Status after Turn 4 — PHASE 1 COMPLETE**: The Doom 3 demo engine builds
+with Emscripten, runs in a browser at `http://localhost:3000`, and renders
+the main menu with the DOOM³ logo, Mars planet background, and all menu
+buttons. Phase 1 (Baseline Setup) is done.
