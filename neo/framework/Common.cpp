@@ -2604,7 +2604,12 @@ void idCommonLocal::Init(int argc, char** argv) {
 
     if ( !AddStartupCommands()) {
       // if the user didn't give any commands, run default action
-      session->StartMenu(true);
+      // D3WEBGPU FIX: pass false to skip the intro logo animation
+      // (Squishy windowDef / id Software logo GUI). Press ESC or click
+      // through it if you want to see it. The cinematic intro in the demo
+      // build is a 10s GUI animation — no RoQ video is decoded.
+      // To re-enable, change to StartMenu(true).
+      session->StartMenu(false);
     }
 
     // print all warnings queued during initialization

@@ -241,8 +241,11 @@ if (EMSCRIPTEN)
   set(ldflags "${ldflags} -o d3wasm.html")
   set(ldflags "${ldflags} -s FORCE_FILESYSTEM=1")
   set(ldflags "${ldflags} -s INITIAL_MEMORY=402653184") # 384MB initial (proven value; going below 320MB crashed after a couple of levels)
-  set(ldflags "${ldflags} -s ALLOW_MEMORY_GROWTH=1")    # let the heap grow past 384MB if the engine needs more (newer Emscripten)
-  set(ldflags "${ldflags} -s MAXIMUM_MEMORY=2147483648") # cap growth at 2GB (wasm32-safe)
+  # v1 fix: disabled memory growth because Emscripten's resizable WASM heap
+  # makes Chromium reject heap views in TextDecoder.decode() and WebGL APIs
+  # (bufferData, texImage2D, ...). 384MB initial has been proven enough for the demo.
+  # set(ldflags "${ldflags} -s ALLOW_MEMORY_GROWTH=1")
+  # set(ldflags "${ldflags} -s MAXIMUM_MEMORY=2147483648")
   set(ldflags "${ldflags} -s STACK_SIZE=8388608")       # 8MB stack; id Tech 4 init needs far more than the Emscripten default
   set(ldflags "${ldflags} -s ASYNCIFY=1")
   set(ldflags "${ldflags} -s MINIFY_HTML=0")

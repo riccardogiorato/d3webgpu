@@ -469,3 +469,98 @@ Chromium silently accepted resizable ArrayBuffers and had `preserveDrawingBuffer
 masking two real-world failures (TextDecoder rejection + stale-cache serving of an
 unpatched build). Always verify in the user's actual browser, and remember
 `python3 -m http.server` emits no cache headers — cache-bust your script tags.
+
+## Turn 7 — Mon Jul 6 ~14:00: Next resizable-heap failure: WebGL `bufferData`
+
+### Problem
+The TextDecoder fix worked — the user loaded the page in Chrome, the pk4 loaded,
+OpenAL/OpenGL initialized, GLSL shaders compiled. Then a **new crash** appeared:
+
+```
+TypeError: Failed to execute 'bufferData' on 'WebGLRenderingContext':
+  The provided ArrayBufferView value must not be resizable.
+```
+
+This means the resizable WASM heap is rejected by **multiple browser APIs**: not
+just `TextDecoder.decode()`, but also WebGL functions that accept
+`ArrayBufferView`s. This cascade will likely hit `bufferSubData`, `texImage2D`,
+`texSubImage2D`, etc. as well.
+
+### Diagnosis
+`ALLOW_MEMORY_GROWTH=1` makes Emscripten create a resizable ArrayBuffer for the
+WASM memory. Chromium (and Arc's Chromium) strictly rejects views of such buffers
+in several legacy APIs. Fixing every WebGL wrapper in the minified Emscripten
+glue would be fragile whack-a-mole.
+
+### Solution for v1
+Disable `ALLOW_MEMORY_GROWTH` in `neo/CMakeLists.txt`. Keep the large
+`INITIAL_MEMORY=384MB` and `STACK_SIZE=8MB` that fixed the Phase 1 OOB crash.
+That gives a **fixed, non-resizable 384MB heap**, which both TextDecoder and WebGL
+will accept. The demo levels fit in 384MB (that was already the "proven value").
+If the full game needs more later, we can raise `INITIAL_MEMORY` or revisit a
+WebGL-copying polyfill.
+
+### Lesson
+Emscripten `ALLOW_MEMORY_GROWTH` with a resizable ArrayBuffer is a time-bomb on
+browsers that enforce the spec restriction. For a stable v1, either use a huge
+fixed initial heap or add a safe-copy layer for every browser API that touches
+heap views.
+
+## Turn 9 — Skip intro cinematic + fix misleading keyboard hint (Qwen 3.7 Max)
+
+### Problem
+1. On every reload the demo plays a ~10s "intro cinematic" before the main menu
+   appears. For rapid debugging this is wasted time. The original shell.html
+   also told users to press **HOME** to open the menu, but `default.cfg` only
+   binds **ESCAPE** to `togglemenu` — HOME is not bound to anything, so the hint
+   was wrong.
+2. Confusion about how to open the in-game menu on macOS when the cursor is
+   captured by the canvas.
+
+### Investigation
+- `neo/framework/Common.cpp:2607` calls `session->StartMenu(true)` when no
+  startup commands are given. The `true` arg fires the `playIntro` named event
+  on `demo_mainmenu.gui`, which runs the `Squishy` windowDef — a 10s pure-GUI
+  animation of the id Software logo (no RoQ video is decoded in the demo build;
+  the `video/intro/introid.RoQ` / `introloop.RoQ` files exist in the pk4 but are
+  not played by the demo menu flow).
+- `guis/intro.gui` has `onESC { set "cmd" "startgame" }`, so ESC during the
+  intro jumps straight into the game — but there is no bound key that just
+  *skips to the menu* without starting a game.
+- `default.cfg` confirms: `bind ESCAPE "togglemenu"` and `bind PAUSE "pause"`.
+  There is **no** HOME binding. The shell.html hint was inaccurate.
+
+### Solution
+1. **Skip the intro by default** — `neo/framework/Common.cpp`: change
+   `StartMenu(true)` → `StartMenu(false)`. The menu now appears immediately on
+   load (no 10s logo animation). To re-enable the intro, change back to `true`.
+2. **Fix the keyboard hint** — `neo/sys/wasm/shell.html`: replaced both
+   occurrences of the misleading "use HOME key instead of ESC key" text with an
+   accurate hint: *"press ESC to open the menu or skip the intro cinematic,
+   PAUSE to pause, and INSERT to open the console. The intro cinematic is
+   auto-skipped in this build (D3WEBGPU port)."*
+
+### Verification (Computer Use + Chrome DevTools)
+- Hard-reloaded `localhost:3001/d3wasm.html` after rebuild.
+- Window title became **"d3wasm 0.4"**.
+- Tab badge: **"Audio playing - Memory usage - 666 MB"** — game running with
+  sound.
+- DevTools console (106 messages) shows the full init sequence with no crashes:
+  shaders compiled, session initialized, `guis/mainmenu.gui` not found
+  (expected — demo falls back to `demo_mainmenu.gui`), 384MB detected.
+- New hint text visible on the page.
+- No intro/logo animation observed — menu reached immediately.
+
+### Known issues (non-fatal, to investigate later)
+- `Uncaught (in promise) WrongDocumentError: The root document of this element
+  is not valid for pointer lock.` — canvas pointer lock request fails, likely
+  because DevTools was open during the request. Not fatal; the game still runs.
+- `AudioContext was not allowed to start… must be resumed after a user gesture`
+  — Chrome autoplay policy; audio starts after the first click on the canvas.
+- `favicon.ico 404` — harmless, no favicon served by the python http.server.
+
+### Lesson
+The "intro cinematic" in the Doom 3 *demo* is a 10s GUI animation, not a video
+file. Skipping it is a one-arg change (`StartMenu(false)`). Always grep
+`default.cfg` to verify which keys are actually bound before documenting
+keyboard shortcuts to users.
