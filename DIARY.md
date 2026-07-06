@@ -659,3 +659,93 @@ WebSocket or a framework for a one-bit "changed → reload" signal; (2) the
 WHATWG URL parser normalizes `..` and `%2e%2e` *before* your route handler, so
 traversal protection often happens upstream of any explicit check — verify the
 **outcome** (an outside-root file isn't served), not the status code.
+
+## Turn 11 — ESC fix that wasn't, auto-rebuild dev server, React/Vite pivot (GLM 5.2)
+
+### Problem
+After Turn 10 the user reported BOTH blockers still open: pressing ESC does not
+open the menu, and the intro cinematic still plays on load. The Turn-9 ESC
+pointer-lock forwarding (synthetic `KeyboardEvent`) had never actually been
+verified in a browser.
+
+### Investigation (static only — code + glue + GUI; this env has no browser tool)
+**ESC key path.** `d3wasm.js` (~line 3330) builds the SDL key event from
+`e.keyCode` (`HEAP32[idx+6]=e.keyCode`, `[idx+7]=e.which`) and does NOT filter
+on `event.isTrusted` — so synthetic `KeyboardEvent`s ARE processed by the glue.
+BUT modern Chrome ignores `keyCode`/`which` in the `KeyboardEvent()` init dict
+(read-only, always 0 for synthetic events), so the Turn-9 forward arrived as
+`keyCode 0` and Doom ignored it. Fix applied: override the getters on the event
+instance via `Object.defineProperty` so the glue reads 27:
+
+    function _d3SynthEscKey(type) {
+      var ev = new KeyboardEvent(type, {key:'Escape', code:'Escape', bubbles:true});
+      Object.defineProperty(ev, 'keyCode',  {get(){return 27;}});
+      Object.defineProperty(ev, 'which',   {get(){return 27;}});
+      Object.defineProperty(ev, 'charCode',{get(){return 0;}});
+      return ev;
+    }
+
+Applied to both `neo/sys/wasm/shell.html` (source) and the served
+`build-wasm/d3wasm.html`. `ccall`/`cwrap` are present in the glue → a fallback
+exists (call an exported C command-executor directly; needs an `extern "C"`
+wrapper + `EXPORTED_FUNCTIONS` + rebuild).
+
+**Cinematic.** `Common.cpp:2612` calls `session->StartMenu(false)` when there
+are no startup commands. `Session_menu.cpp:81`:
+`guiMainMenu->HandleNamedEvent(playIntro ? "playIntro" : "noIntro")`. Inside
+`guis/demo_mainmenu.gui` (extracted from `build-wasm/data/demo/demo00.pk4`): the
+`NoIntro` handler does NOT `resetTime "Squishy"`, while `PlayIntro` DOES
+(`resetTime "Squishy" "0"` → starts the 10s id-logo animation); `Squishy` is
+`visible 0; notime 1` by default. **So `StartMenu(false)` correctly skips the
+Squishy logo.** The served `d3wasm.wasm` (built 15:42, after the 15:31 commit)
+already contains this. Therefore the cinematic the user still sees is NOT Squishy
+→ either (a) a **stale cached build** (pre-`StartMenu(false)` wasm served from
+browser cache, despite the dev server's `no-store`), or (b) a different intro:
+`guis/intro.gui` (`onESC { set "cmd" "startgame" }` — i.e. ESC there *starts the
+game*, not togglemenu, which would also explain "ESC doesn't open the menu"), a
+RoQ video (`video/intro/introid.RoQ`, `introloop.RoQ` in the pk4), or a recorded
+demo (`demo00`).
+
+**Key blocker.** This environment has NO browser-automation / Computer-Use tool.
+All of the above is static analysis. The decisive evidence — the DevTools
+console during the cinematic (what is actually playing), whether
+`[D3WEBGPU] Forwarded ESC...` logs on ESC, and the Network tab (is the wasm
+served `no-store` and actually the fresh build) — could not be obtained. The
+user's explicit feedback: **stop assuming, debug in the real app.**
+
+### Solution (delivered; ESC UNVERIFIED in browser)
+- ESC: `Object.defineProperty` `keyCode`/`which` override (above) in
+  `shell.html` + served html.
+- Auto-rebuild dev server: `scripts/dev-server.mjs` gained a `neo/` source
+  watcher (default ON; `REBUILD=0` to disable) that runs an incremental
+  `emmake make d3wasm` via `scripts/build.sh` (with `EMSDK_QUIET=1` to silence
+  the emsdk env spam) on `.cpp/.h/.inl/.cmake`/`CMakeLists.txt` changes,
+  debounced 500 ms, one build at a time; on success the existing artifact-watcher
+  fires the SSE reload, on failure the page is NOT reloaded. Verified
+  end-to-end: touching one `.cpp` → 9.9 s incremental make → new
+  `d3wasm.{wasm,js,html}` → reload pushed to the browser.
+- `package.json` collapsed to two scripts: `dev` (serve + auto-rebuild + live
+  reload) and `build` (one-shot). Dropped `start`/`preview`/`dev:watch`/`build:wasm`.
+- Bindings confirmed from `default.cfg` (inside `demo00.pk4`):
+  `ESCAPE`=togglemenu, `PAUSE`=pause, `F5`="savegame quick", `F9`="loadgame
+  quick", `F12`=screenshot, `R`=_impulse13 (reload), `F`=_impulse11 (flashlight),
+  `TAB`=_impulse19 (PDA), 1–0/q=weapons.
+
+### Next (approved by user: Vite + React)
+Replace the outdated `d3wasm.html` shell with a Vite + React app: full-screen
+canvas (game fills the viewport, no surrounding chrome), modern UI, and an
+overlay of buttons that send keyboard shortcuts into the running game (Save=F5,
+Load=F9, Menu=ESC, Pause=PAUSE, Screenshot=F12) via the same synthetic-key
+mechanism (viable — no `isTrusted` gate). Handed off (see `HANDOFF.md`) because
+the two bugs need runtime observation that requires browser automation, which
+this environment lacks.
+
+### Lesson
+**Static analysis can prove a mechanism is *possible*, not that it *works*.**
+The ESC keyCode fix and the cinematic skip both look correct in the source — yet
+the user reports both still broken. The gap is runtime: which build is actually
+loaded (cache), which gui/video is actually playing, and whether the synthetic
+event actually reaches the SDL layer in the user's browser/version. Without a way
+to observe the running app (DevTools console / browser automation), every "fix"
+is a hypothesis. When you can't drive the browser, say so explicitly and hand off
+to someone who can — don't keep stacking fixes on guesses.
