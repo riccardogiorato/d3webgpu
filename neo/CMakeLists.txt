@@ -28,7 +28,7 @@ if (EMSCRIPTEN)
   set(NOMT  ON)
   set(NODLL ON)
   set(WEBGL ON)
-  set(CMAKE_EXECUTABLE_SUFFIX ".html") # use the HTML suffix (will emit .html, .js and .wasm)
+  set(CMAKE_EXECUTABLE_SUFFIX ".js") # D3WEBGPU Phase 2: MODULARIZE -> emit d3wasm.js (+ d3wasm.wasm), no HTML
 else ()
   set(NOEFX ON)
   set(NOMT  ON)
@@ -237,8 +237,13 @@ if (EMSCRIPTEN)
   # full data preload
   #set(ldflags "${ldflags} --pre-js ../neo/sys/wasm/pre-full.js")
 
-  set(ldflags "${ldflags} --shell-file ../neo/sys/wasm/shell.html")
-  set(ldflags "${ldflags} -o d3wasm.html")
+  # D3WEBGPU Phase 2: MODULARIZE. Emit d3wasm.js + d3wasm.wasm only (no HTML).
+  # The React host (or bare harness) loads demo00.js (augments the shared Module
+  # config) then d3wasm.js and boots the engine via DoomModule(moduleConfig).
+  # --shell-file is dropped: React's index.html (or d3wasm-modtest.html) is the host.
+  set(ldflags "${ldflags} -o d3wasm.js")
+  set(ldflags "${ldflags} -s MODULARIZE=1")
+  set(ldflags "${ldflags} -s EXPORT_NAME=DoomModule")
   set(ldflags "${ldflags} -s FORCE_FILESYSTEM=1")
   set(ldflags "${ldflags} -s INITIAL_MEMORY=402653184") # 384MB initial (proven value; going below 320MB crashed after a couple of levels)
   # v1 fix: disabled memory growth because Emscripten's resizable WASM heap

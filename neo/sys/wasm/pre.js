@@ -1,20 +1,23 @@
+// D3WEBGPU Phase 2 (MODULARIZE): this file is --pre-js'd into the DoomModule
+// factory, so `Module` here is the config object the host passed to
+// DoomModule(moduleConfig). We push setupD3memfs onto Module.preRun so the
+// engine sets up /usr/local/share/d3wasm/base + the IDBFS-backed user home
+// before main() runs.
+//
+// NOTE: the demo00.js data preloader is NO LONGER injected here. Under
+// MODULARIZE there is no global `Module`, so a document-injected <script
+// src=demo00.js> would create an orphan Module and the data would never
+// attach to the engine. Instead the HOST loads demo00.js first (it does
+// `var Module = typeof Module != 'undefined' ? Module : {}`, picking up the
+// host's `window.Module` config and augmenting it), then calls
+// DoomModule(window.Module). demo00.js pushes runWithFS onto the same
+// config.preRun, so the data file loads with a run-dependency that gates main().
 var Module;
 if (Module['preRun'] instanceof Array) {
   Module['preRun'].push(setupD3memfs);
 } else {
   Module['preRun'] = [setupD3memfs];
 }
-
-(function(d, script) {
-  script = d.createElement('script');
-  script.type = 'text/javascript';
-  script.async = false;
-  script.onload = function(){
-    // remote script has loaded
-  };
-  script.src = 'demo00.js';
-  d.getElementsByTagName('head')[0].appendChild(script);
-}(document));
 
 function setupD3memfs() {
   console.info("Creating d3wasm data folder (/usr/local/share/d3wasm/base)");
