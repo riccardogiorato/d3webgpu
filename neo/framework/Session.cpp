@@ -2069,7 +2069,15 @@ bool idSessionLocal::ProcessEvent(const sysEvent_t* event) {
   // DG: but shift-escape should bring up console instead so ignore that
   if ( !guiActive && event->evType == SE_KEY && event->evValue2 == 1
        #ifdef __EMSCRIPTEN__
-      && (event->evValue == K_HOME)) {
+      // D3WEBGPU FIX: ESC must open the menu on the WASM build too. The original
+      // d3wasm port keyed this special-case to K_HOME on Emscripten (presumably
+      // because the browser swallows ESC to exit pointer lock). But the shipped
+      // default.cfg binds ESCAPE to "togglemenu", which is NOT a registered
+      // console command in this port -> ESC became a hard no-op in-game (the
+      // user's bug). The shell.html pointer-lock forwarder now delivers a
+      // synthetic ESC (keyCode 27 = K_ESCAPE) on pointerlockchange-exit, so
+      // accept K_ESCAPE here as well. K_HOME is kept for back-compat.
+      && (event->evValue == K_ESCAPE || event->evValue == K_HOME)) {
       #else
        && event->evValue == K_ESCAPE && !idKeyInput::IsDown(K_SHIFT)) {
        #endif
@@ -2726,6 +2734,91 @@ bool idSessionLocal::RunGameTic() {
   }
   return true;
 }
+
+/*
+===============
+d3_exec_cmd  (Emscripten only)
+
+Execute an arbitrary console command string from JavaScript. This is the
+robust, input-layer-independent control surface used by the React overlay
+buttons (Menu/Save/Load/Pause/Screenshot) and by automated verification:
+instead of synthesizing keyboard events (fragile: pointer lock, isTrusted,
+keyCode quirks), JS calls Module.ccall('d3_exec_cmd', null, ['string'],
+['togglemenu']) and the command runs through the real cmdSystem.
+
+EMSCRIPTEN_KEEPALIVE exports this symbol additively -- it does NOT replace the
+default EXPORTED_FUNCTIONS set, so it can't break the existing exports. It is
+only compiled under __EMSCRIPTEN__ (the wasm build); native builds are untouched.
+===============
+*/
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+
+// ---------------------------------------------------------------------------
+// D3WEBGPU control surface for JavaScript (Emscripten only).
+//
+// The React overlay buttons (Menu/Save/Load/Pause/Screenshot) and automated
+// verification need to drive the engine WITHOUT synthesizing keyboard events
+// (fragile: pointer lock, isTrusted, keyCode quirks) and WITHOUT ccall (not
+// exported by default; reading Module.ccall even with typeof triggers an
+// aborting getter). So we export a set of NO-ARG C functions via
+// EMSCRIPTEN_KEEPALIVE: JS calls Module._d3_load_demo_map() etc. directly --
+// no string marshalling, no runtime-method exports, no risk to FS/IDBFS.
+//
+// Each maps to the real engine action through the command system (registered
+// commands: map, saveGame, loadGame, screenshot) or direct session calls
+// (StartMenu / SetGUI). EMSCRIPTEN_KEEPALIVE is additive -- it does not alter
+// the default EXPORTED_FUNCTIONS set, so it cannot break existing exports.
+// ---------------------------------------------------------------------------
+
+EMSCRIPTEN_KEEPALIVE
+extern "C" void d3_exec_cmd( const char *cmd ) {
+	// Generic: run any registered console command string. Needs JS-side string
+	// marshalling (HEAP8 + _malloc), so prefer the typed helpers below.
+	if ( cmd && *cmd && cmdSystem ) {
+		cmdSystem->BufferCommandText( CMD_EXEC_NOW, cmd );
+	}
+}
+
+// Load the demo's first level (used by verification + a "Play" button).
+EMSCRIPTEN_KEEPALIVE
+extern "C" void d3_load_demo_map() {
+	if ( cmdSystem ) cmdSystem->BufferCommandText( CMD_EXEC_NOW, "map game/demo_mars_city1" );
+}
+
+// Open the menu (in-game -> main/in-game menu). Mirrors the ESC special-case.
+EMSCRIPTEN_KEEPALIVE
+extern "C" void d3_open_menu() {
+	if ( session ) session->StartMenu();
+}
+
+// Close any active GUI and return to the game.
+EMSCRIPTEN_KEEPALIVE
+extern "C" void d3_close_menu() {
+	if ( session ) session->SetGUI( NULL, NULL );
+}
+
+EMSCRIPTEN_KEEPALIVE
+extern "C" void d3_save_quick() {
+	if ( cmdSystem ) cmdSystem->BufferCommandText( CMD_EXEC_NOW, "savegame quick" );
+}
+
+EMSCRIPTEN_KEEPALIVE
+extern "C" void d3_load_quick() {
+	if ( cmdSystem ) cmdSystem->BufferCommandText( CMD_EXEC_NOW, "loadgame quick" );
+}
+
+EMSCRIPTEN_KEEPALIVE
+extern "C" void d3_screenshot() {
+	if ( cmdSystem ) cmdSystem->BufferCommandText( CMD_EXEC_NOW, "screenshot" );
+}
+
+// NOTE: a d3_pause() helper is deferred to Phase 2 -- the "pause" bind is not a
+// registered command in this port, so it needs a real pause mechanism located
+// first (cvar toggle / session pause path). ESC (the actual blocker) is fixed
+// via the K_ESCAPE branch above and verified with d3_load_demo_map + a real
+// Escape keypress.
+#endif
 
 /*
 ===============

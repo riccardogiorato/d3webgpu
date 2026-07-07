@@ -262,40 +262,61 @@
   // served from the browser cache.
   var _CACHE_VERSION = "v2";
 
-  // D3WEBGPU FIX: ESC key + pointer lock on macOS.
-  // When pointer lock is active, the browser intercepts ESC to exit pointer lock
-  // and does NOT forward the keyup to the canvas. We listen for pointerlockchange
-  // and, when lock exits, dispatch a synthetic ESC keydown/keyup so the game
-  // receives it.
+  // D3WEBGPU FIX: ESC opens the menu reliably (verified live in-browser).
+  //
+  // Root cause (Session.cpp ~line 2072, fix A): under __EMSCRIPTEN__ the
+  // "ESC brings up the menu" special-case was keyed to K_HOME, not K_ESCAPE.
+  // default.cfg binds ESCAPE to "togglemenu", which is NOT a registered command
+  // in this port, so ESC was a hard no-op in-game. Fix A makes that branch
+  // accept K_ESCAPE. But the Emscripten key listener only acts on DOCUMENT-
+  // targeted key events: a synthetic ESC dispatched to the canvas does NOT reach
+  // it (verified), and a physical ESC targets the focused canvas. So we BRIDGE:
+  // catch every physical Escape at the document level and re-dispatch a
+  // document-targeted synthetic ESC (keyCode 27), which the engine accepts ->
+  // ProcessEvent -> fix A -> StartMenu (in-game), or the active GUI's onESC
+  // (in a menu). This makes the user's physical ESC open the menu regardless of
+  // focus or pointer-lock state.
   //
   // KEY GOTCHA: modern Chrome IGNORES keyCode/which in the KeyboardEvent() init
-  // dict — they're read-only and always 0 for synthetic events. But the
-  // Emscripten glue builds the SDL key event from e.keyCode
-  // (d3wasm.js: HEAP32[idx+6]=e.keyCode, [idx+7]=e.which), so a naive synthetic
-  // ESC arrives as keyCode 0 and Doom ignores it (menu never toggles). Override
-  // the getters on the event instance so the glue reads the real Escape code
-  // (27), exactly like a physical ESC press.
+  // dict (always 0 for synthetic events). The Emscripten glue builds the SDL key
+  // from e.keyCode (HEAP32[idx+6]=e.keyCode), so we override the getters on the
+  // event instance to return 27, exactly like a physical ESC.
   function _d3SynthEscKey(type) {
     var ev = new KeyboardEvent(type, {key:'Escape', code:'Escape', bubbles:true, cancelable:true});
     Object.defineProperty(ev, 'keyCode',  {get:function(){return 27;}});
     Object.defineProperty(ev, 'which',   {get:function(){return 27;}});
     Object.defineProperty(ev, 'charCode',{get:function(){return 0;}});
+    Object.defineProperty(ev, '_d3fwd',  {get:function(){return true;}}); // marker: bridged, don't re-bridge
     return ev;
   }
+  // ESC bridge: catch physical Escape (any target) at document; re-dispatch a
+  // document-targeted synth ESC the engine actually processes.
+  (function(){
+    if (window.__d3esc) return; window.__d3esc = true;
+    document.addEventListener('keydown', function(e) {
+      if (e._d3fwd) return;                       // our bridged synth -> let engine handle, no loop
+      if (e.key === 'Escape' || e.keyCode === 27) {
+        document.dispatchEvent(_d3SynthEscKey('keydown'));
+        setTimeout(function(){ document.dispatchEvent(_d3SynthEscKey('keyup')); }, 16);
+      }
+    });
+  })();
+  // Pointer-lock forwarder: when pointer lock IS engaged the browser swallows ESC
+  // (to exit lock) and the page never sees the keydown, so the bridge can't catch
+  // it. On pointerlockchange-exit re-dispatch a document-targeted synth ESC so
+  // the engine still gets it. (Dispatch to DOCUMENT, not canvas -- verified the
+  // listener only acts on document-targeted events. On this macOS build pointer
+  // lock fails to engage so the bridge handles ESC directly; this covers builds/
+  // browsers where lock does engage.)
   var _pendingEscForward = false;
   document.addEventListener('pointerlockchange', function() {
     if (!document.pointerLockElement) {
-      // Pointer lock just exited — forward ESC to game
       _pendingEscForward = true;
       setTimeout(function() {
         if (_pendingEscForward) {
-          var canvas = document.getElementById('canvas');
-          if (canvas) {
-            // keyCode 27 = Escape, key = 'Escape'
-            canvas.dispatchEvent(_d3SynthEscKey('keydown'));
-            canvas.dispatchEvent(_d3SynthEscKey('keyup'));
-            console.log('[D3WEBGPU] Forwarded ESC (keyCode=27) to canvas after pointer lock exit');
-          }
+          document.dispatchEvent(_d3SynthEscKey('keydown'));
+          document.dispatchEvent(_d3SynthEscKey('keyup'));
+          console.log('[D3WEBGPU] Forwarded ESC (keyCode=27) to document after pointer lock exit');
           _pendingEscForward = false;
         }
       }, 50);
