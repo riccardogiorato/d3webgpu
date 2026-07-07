@@ -31,5 +31,6 @@ echo "==> Building $TARGET..."
 emmake make "$TARGET" -j"$(sysctl -n hw.ncpu 2>/dev/null || echo 8)"
 
 echo ""
-echo "✅ Build complete! Output in $BUILD_DIR/"
-echo "   Run 'npm run dev' or 'bun run dev' to serve at http://localhost:3000"
+echo "✅ Engine build complete! Output in $BUILD_DIR/ (d3wasm.js + d3wasm.wasm)"
+echo "   Phase 2 host: \`npm run build\` also builds the React UI into $BUILD_DIR/."
+echo "   Dev loop:    \`npm run dev:all\`  ->  http://localhost:3001/  (React + engine, one origin)"

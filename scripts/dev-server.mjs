@@ -41,7 +41,10 @@ const PORT = Number(process.env.PORT || process.argv[2] || 3001);
 const BUILD_DIR = path.resolve(
   process.env.BUILD_DIR || process.argv[3] || path.join(REPO_ROOT, 'build-wasm')
 );
-const ROOT_FILE = process.env.ROOT_FILE || 'd3wasm.html';
+// D3WEBGPU Phase 2: root is now the React host's index.html (Vite builds the
+// React UI into build-wasm/). The Emscripten shell d3wasm.html is gone (the
+// build is MODULARIZE — d3wasm.js only).
+const ROOT_FILE = process.env.ROOT_FILE || 'index.html';
 const VERBOSE = process.env.VERBOSE === '1';
 
 const MIME = {

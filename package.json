@@ -10,6 +10,10 @@
   },
   "scripts": {
     "dev": "node scripts/dev-server.mjs",
-    "build": "bash scripts/build.sh"
+    "dev:ui": "npm --prefix web run dev",
+    "dev:all": "node scripts/dev-all.mjs",
+    "build": "bash scripts/build.sh && npm --prefix web run build",
+    "build:engine": "bash scripts/build.sh",
+    "build:ui": "npm --prefix web run build"
   }
 }

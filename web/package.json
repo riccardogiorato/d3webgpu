@@ -1,0 +1,20 @@
+{
+  "name": "d3webgpu-host",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "D3WEBGPU Phase 2 — Vite + React host that owns the page, creates the canvas, and boots the MODULARIZE Emscripten engine (DoomModule).",
+  "scripts": {
+    "dev": "vite build --watch --mode development",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^5.4.10"
+  }
+}

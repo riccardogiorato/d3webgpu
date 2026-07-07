@@ -1,9 +1,27 @@
 # PRE-MIGRATION PLAN — d3webgpu (Doom 3 -> WASM/WebGL, before the WebGPU port)
 
-**Date:** 2026-07-06. **Branch:** `master`. **Status:** plan agreed in conversation;
-not yet executed. Companion to `HANDOFF.md` (the bug state) and `DIARY.md`
-(full narrative, esp. Turn 11). This doc records the plan we landed on after
-discussing the Vite + React architecture, so it survives across turns.
+**Date:** 2026-07-06. **Branch:** `master`. **Status:** Phases 0, 1, 2 all done +
+verified live (headless Chromium/Playwright). Phase 2 (target architecture)
+landed in commits `fc2323e` (Stage A: MODULARIZE) + `<Stage B>` (Vite + React
+host). Companion to `HANDOFF.md` (the bug state) and `DIARY.md` (full narrative,
+esp. Turn 11). This doc records the plan we landed on after discussing the
+Vite + React architecture, so it survives across turns.
+
+> **Phase 2 outcome (2026-07-07):** Emscripten now emits `d3wasm.js` +
+> `d3wasm.wasm` only (`MODULARIZE=1`, `EXPORT_NAME=DoomModule`; no HTML). A
+> Vite + React app in `web/` owns the page, creates a fullscreen `<canvas>`,
+> loads `demo00.js` (augments the shared `Module` config) then `d3wasm.js`, and
+> boots `DoomModule(window.Module)`. The shell.html fixes (TextDecoder
+> resizable-heap polyfill, `locateFile` cache-bust, the ESC bridge +
+> pointer-lock forwarder) migrated into `web/src/d3/{polyfills,escBridge,
+> loadEngine,controls}.js`. Overlay buttons (Menu/Save/Load/Screenshot/Play)
+> call the verified `Module._d3_*` KEEPALIVE exports. "One server": `vite build`
+> writes the React UI into `build-wasm/` (`emptyOutDir:false` keeps the engine
+> files), and the existing dev server (`:3001`) serves it all — one origin,
+> no CORS, SSE reload on engine *or* React rebuild. `npm run dev:all` runs
+> both. Verified: React mounts, canvas renders real game content
+> (`game/demo_mars_city1`), Play Demo loads the level, **physical ESC opens the
+> menu** (bridge), Menu/Screenshot buttons work (`shot00001.tga`).
 
 > Why this doc: the previous agent got stuck because its environment had **no
 browser-automation tool**, so the two user blockers (ESC, cinematic) were

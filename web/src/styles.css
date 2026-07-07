@@ -1,0 +1,70 @@
+/* D3WEBGPU Phase 2 — React host styles.
+   The canvas React owns is fullscreen; the Emscripten engine renders WebGL
+   into it. The overlay control bar is migrated from neo/sys/wasm/shell.html
+   (Doom 3 industrial look). pointer-events:none on the bar so mouse input
+   reaches the canvas; only the buttons capture clicks. */
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: #000;
+  overflow: hidden;            /* the canvas owns the viewport */
+  font-family: 'Lucida Console', Monaco, monospace;
+}
+#root { width: 100vw; height: 100vh; }
+
+/* the canvas *must not* have any border or padding, or mouse coords will be wrong */
+#canvas {
+  display: block;
+  width: 100vw;
+  height: 100vh;
+  background: #000;
+  border: 0 none;
+  outline: none;
+}
+
+#d3-status {
+  position: fixed;
+  left: 8px;
+  top: 8px;
+  z-index: 60;
+  font-size: 12px;
+  color: #7a7f84;
+  pointer-events: none;
+  text-shadow: 0 0 4px #000;
+}
+
+/* overlay control bar (migrated from shell.html) */
+#d3-controls {
+  position: fixed;
+  left: 10px;
+  bottom: 10px;
+  z-index: 60;
+  display: flex;
+  gap: 6px;
+  padding: 6px;
+  background: rgba(10, 12, 14, 0.72);
+  border: 1px solid #3a3f44;
+  border-radius: 6px;
+  font-family: 'Lucida Console', Monaco, monospace;
+  pointer-events: none;        /* let mouse reach the canvas through the bar */
+  -webkit-user-select: none;
+  user-select: none;
+}
+.d3-btn {
+  pointer-events: auto;        /* only the buttons themselves capture clicks */
+  background: #16181b;
+  color: #c9ccd0;
+  border: 1px solid #3a3f44;
+  border-radius: 4px;
+  padding: 5px 10px;
+  font-size: 12px;
+  letter-spacing: .5px;
+  cursor: pointer;
+  transition: background .12s, border-color .12s, color .12s;
+}
+.d3-btn:hover:not(:disabled) { background: #2a2e33; border-color: #d98b3a; color: #fff; }
+.d3-btn:active:not(:disabled) { background: #d98b3a; color: #16181b; }
+.d3-btn:disabled { opacity: .45; cursor: default; }
+.d3-btn small  { color: #7a7f84; font-size: 10px; margin-left: 4px; }
+.d3-btn:hover:not(:disabled) small { color: #e0a868; }
